@@ -165,8 +165,9 @@ RTC_DATA_ATTR uint32_t rtc_totalMsgsSent = 0;
 HardwareSerial gpsSerial(1);
 TinyGPSPlus    gps;
 
-// SSD1306 128×64 via hardware I2C (Wire)
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
+// SSD1306 128×64 via hardware I2C — pins expliciet meegeven aan constructor
+// Volgorde: (rotatie, reset, klok, data)
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE, PIN_OLED_SCL, PIN_OLED_SDA);
 
 #if ENABLE_LORA
 // SX1276: CS, DIO0 (niet gebruikt=NC), RST, DIO1 (niet gebruikt=NC)
@@ -384,9 +385,26 @@ void setup() {
     // ── SW-520D input ────────────────────────────────────────────────────
     pinMode(PIN_SW520D, INPUT_PULLUP);
 
-    // ── I2C + OLED ───────────────────────────────────────────────────────
+    // ── I2C scan + OLED ─────────────────────────────────────────────────
     Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
-    oled.begin();
+    Serial.println("I2C scan:");
+    bool i2cFound = false;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("  Gevonden: 0x%02X", addr);
+            if (addr == 0x3C || addr == 0x3D) Serial.print(" <- OLED");
+            Serial.println();
+            i2cFound = true;
+        }
+    }
+    if (!i2cFound) Serial.println("  Niets gevonden — check bedrading SDA/SCL");
+
+    if (!oled.begin()) {
+        Serial.println("OLED begin() mislukt!");
+    } else {
+        Serial.println("OLED OK");
+    }
 
     // ── SPI + LoRa ───────────────────────────────────────────────────────
 #if ENABLE_LORA
