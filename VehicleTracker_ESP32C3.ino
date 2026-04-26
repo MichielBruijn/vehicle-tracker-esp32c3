@@ -157,6 +157,7 @@ RTC_DATA_ATTR float    rtc_lastLat       = 0.0f;
 RTC_DATA_ATTR float    rtc_lastLon       = 0.0f;
 RTC_DATA_ATTR bool     rtc_hasPosition   = false;
 RTC_DATA_ATTR uint32_t rtc_wakeupCount   = 0;
+RTC_DATA_ATTR uint32_t rtc_motionCount   = 0;   // Alleen SW-520D triggers
 RTC_DATA_ATTR uint32_t rtc_totalMsgsSent = 0;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -224,8 +225,9 @@ void oledShowSearching(uint32_t elapsed_ms) {
 #endif
     oled.drawStr(0, 52, buf);
 
-    snprintf(buf, sizeof(buf), "Wake#%lu", rtc_wakeupCount);
-    oled.drawStr(0, 64, buf);
+    char motBuf[22];
+    snprintf(motBuf, sizeof(motBuf), "Beweging: %lu", rtc_motionCount);
+    oled.drawStr(0, 64, motBuf);
     oled.sendBuffer();
 }
 
@@ -283,10 +285,9 @@ void oledShowStatus(float lat, float lon, bool newFix, uint8_t batPct, bool sent
     oled.setFont(u8g2_font_6x10_tf);
 #endif
 
-    char wkStr[22];
-    snprintf(wkStr, sizeof(wkStr), "Wake#%lu  Tot#%lu",
-             rtc_wakeupCount, rtc_totalMsgsSent);
-    oled.drawStr(0, 64, wkStr);
+    char motStr[22];
+    snprintf(motStr, sizeof(motStr), "Beweging: %lu", rtc_motionCount);
+    oled.drawStr(0, 64, motStr);
     oled.sendBuffer();
 }
 
@@ -345,6 +346,9 @@ void setup() {
 
     // ── Wakeup reden controleren ─────────────────────────────────────────
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    if (cause == ESP_SLEEP_WAKEUP_GPIO) {
+        rtc_motionCount++;
+    }
 
 #if ENABLE_LORA
     if (cause == ESP_SLEEP_WAKEUP_TIMER) {
