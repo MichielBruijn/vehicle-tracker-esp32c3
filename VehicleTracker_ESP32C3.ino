@@ -115,10 +115,12 @@
 #define PIN_BATT_ADC    3
 #define PIN_LORA_SCK    4
 #define PIN_LORA_MISO   5
-#define PIN_LORA_MOSI   6
-#define PIN_LORA_CS     7
-#define PIN_OLED_SDA    8
-#define PIN_OLED_SCL    9
+#define PIN_LORA_MOSI   6   // !! Bij LoRa aan: OLED SDA verplaatsen naar vrije pin
+#define PIN_LORA_CS     7   // !! Bij LoRa aan: OLED SCL verplaatsen naar vrije pin
+#define PIN_OLED_SDA    6   // Draad van GPIO8 naar GPIO6 verplaatsen
+#define PIN_OLED_SCL    7   // Draad van GPIO9 naar GPIO7 verplaatsen
+#define PIN_LED         8   // Ingebouwde LED (was SDA — nu vrij)
+#define PIN_BTN         9   // User/BOOT button (was SCL — nu vrij)
 #define PIN_LORA_RST    10
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -148,6 +150,21 @@
 #include <SPI.h>
 #include <RadioLib.h>
 #endif
+
+// ─── LED blink patronen ─────────────────────────────────────────────────────
+// 1 kort:  wakeup door beweging
+// 2 kort:  GPS fix verkregen
+// 3 kort:  LoRa verstuurd
+// 1 lang:  button actie bevestiging
+inline void ledOn()  { digitalWrite(PIN_LED, HIGH); }
+inline void ledOff() { digitalWrite(PIN_LED, LOW);  }
+
+void ledBlink(uint8_t n, uint16_t onMs = 80, uint16_t offMs = 120) {
+    for (uint8_t i = 0; i < n; i++) {
+        ledOn();  delay(onMs);
+        ledOff(); if (i < n - 1) delay(offMs);
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  RTC GEHEUGEN — overleeft deep sleep
@@ -374,7 +391,7 @@ void goDeepSleep() {
     radio.sleep();
 #endif
 
-    // OLED uit
+    ledOff();
     oled.setPowerSave(1);
 
     // Pull-up op SW-520D actief houden tijdens deep sleep
@@ -406,12 +423,15 @@ void goDeepSleep() {
 // ═══════════════════════════════════════════════════════════════════════════
 void setup() {
     Serial.begin(115200);
+    pinMode(PIN_LED, OUTPUT);  ledOff();
+    pinMode(PIN_BTN, INPUT_PULLUP);
     rtc_wakeupCount++;
 
     // ── Wakeup reden controleren ─────────────────────────────────────────
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
     if (cause == ESP_SLEEP_WAKEUP_GPIO) {
         rtc_motionCount++;
+        ledBlink(1);   // 1 kort = beweging gedetecteerd
     }
 
 #if ENABLE_LORA
@@ -540,6 +560,7 @@ void setup() {
         rtc_lastLat     = curLat;
         rtc_lastLon     = curLon;
         rtc_hasPosition = true;
+        ledBlink(2);   // 2 kort = GPS fix
 
         // Dag-rollover detecteren via GPS datum
         if (gps.date.isValid()) {
@@ -575,15 +596,37 @@ void setup() {
 
     // ── Sensor testloop — live AAN/UIT indicator + satellite count ───────
     {
-        uint32_t testStart  = millis();
-        uint32_t lastSensor = 0;
-        bool prevSensor     = (digitalRead(PIN_SW520D) == LOW);  // beginstand
+        uint32_t testStart    = millis();
+        uint32_t extraMs      = 0;          // verlengingen via button
+        uint32_t lastSensor   = 0;
+        uint32_t btnPressedAt = 0;          // tijdstip button ingedrukt
+        bool prevSensor       = (digitalRead(PIN_SW520D) == LOW);
+        bool prevBtn          = (digitalRead(PIN_BTN) == LOW);
         uint8_t sats        = gps.satellites.isValid() ? (uint8_t)gps.satellites.value() : 0;
 
-        while (millis() - testStart < SENSOR_TEST_MS) {
+        while (millis() - testStart < SENSOR_TEST_MS + extraMs) {
             bool sensorNow = (digitalRead(PIN_SW520D) == LOW);
+            bool btnNow    = (digitalRead(PIN_BTN) == LOW);
             uint32_t now   = millis();
-            uint32_t secsLeft = (SENSOR_TEST_MS - (now - testStart)) / 1000;
+            uint32_t elapsed  = now - testStart;
+            uint32_t total    = SENSOR_TEST_MS + extraMs;
+            uint32_t secsLeft = elapsed < total ? (total - elapsed) / 1000 : 0;
+
+            // ── Button detectie ─────────────────────────────────────────
+            if (btnNow && !prevBtn) {
+                btnPressedAt = now;           // begin indrukken
+            }
+            if (!btnNow && prevBtn) {
+                uint32_t held = now - btnPressedAt;
+                if (held >= 2000) {
+                    extraMs += 30000;         // lang: +30s testijd
+                    ledBlink(1, 400);         // 1 lang = verlengd
+                } else {
+                    rtc_motionCount = 0;      // kort: teller reset
+                    ledBlink(3, 60, 60);      // 3 snel = gereset
+                }
+            }
+            prevBtn = btnNow;
 
             // Alleen tellen op neergaande flank (open→gesloten) + tijdsblokkering
             if (sensorNow && !prevSensor && (now - lastSensor >= SENSOR_DEBOUNCE_MS)) {
