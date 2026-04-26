@@ -495,6 +495,7 @@ void setup() {
     uint32_t gpsStart    = millis();
     uint32_t lastOledMs  = 0;
     uint32_t lastTrigger = 0;
+    bool prevSensor      = (digitalRead(PIN_SW520D) == LOW);  // beginstand
 
     while (millis() - gpsStart < GPS_FIX_TIMEOUT_MS) {
         while (gpsSerial.available()) {
@@ -509,11 +510,12 @@ void setup() {
         bool sensorNow = (digitalRead(PIN_SW520D) == LOW);
         uint32_t now   = millis();
 
-        // Tijdsblokkering: eenmaal geteld → SENSOR_DEBOUNCE_MS doof
-        if (sensorNow && (now - lastTrigger >= SENSOR_DEBOUNCE_MS)) {
+        // Alleen tellen op neergaande flank (open→gesloten) + tijdsblokkering
+        if (sensorNow && !prevSensor && (now - lastTrigger >= SENSOR_DEBOUNCE_MS)) {
             rtc_motionCount++;
             lastTrigger = now;
         }
+        prevSensor = sensorNow;
 
         // OLED update elke 200ms
         if (now - lastOledMs >= 200) {
@@ -570,6 +572,7 @@ void setup() {
     {
         uint32_t testStart  = millis();
         uint32_t lastSensor = 0;
+        bool prevSensor     = (digitalRead(PIN_SW520D) == LOW);  // beginstand
         uint8_t sats        = gps.satellites.isValid() ? (uint8_t)gps.satellites.value() : 0;
 
         while (millis() - testStart < SENSOR_TEST_MS) {
@@ -577,11 +580,12 @@ void setup() {
             uint32_t now   = millis();
             uint32_t secsLeft = (SENSOR_TEST_MS - (now - testStart)) / 1000;
 
-            // Tijdsblokkering: eenmaal geteld → SENSOR_DEBOUNCE_MS doof
-            if (sensorNow && (now - lastSensor >= SENSOR_DEBOUNCE_MS)) {
+            // Alleen tellen op neergaande flank (open→gesloten) + tijdsblokkering
+            if (sensorNow && !prevSensor && (now - lastSensor >= SENSOR_DEBOUNCE_MS)) {
                 rtc_motionCount++;
                 lastSensor = now;
             }
+            prevSensor = sensorNow;
 
             // Satellietcount bijwerken als GPS nog data stuurt
             while (gpsSerial.available()) gps.encode(gpsSerial.read());
