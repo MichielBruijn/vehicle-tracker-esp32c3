@@ -431,7 +431,9 @@ void setup() {
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
     if (cause == ESP_SLEEP_WAKEUP_GPIO) {
         rtc_motionCount++;
-        ledBlink(1);   // 1 kort = beweging gedetecteerd
+        ledBlink(1);          // 1 kort = beweging (deep sleep wakeup)
+    } else {
+        ledBlink(2, 120, 80); // 2 kort = eerste boot / USB reset
     }
 
 #if ENABLE_LORA
@@ -516,13 +518,16 @@ void setup() {
     uint8_t batPct = voltageToPercent(batV);
 
     // ── GPS fix proberen ─────────────────────────────────────────────────
-    bool newFix      = false;
+    bool     newFix      = false;
+    bool     skipGPS     = false;
     uint32_t gpsStart    = millis();
     uint32_t lastOledMs  = 0;
     uint32_t lastTrigger = 0;
-    bool prevSensor      = (digitalRead(PIN_SW520D) == LOW);  // beginstand
+    uint32_t btnDownAt   = 0;
+    bool     prevSensor  = (digitalRead(PIN_SW520D) == LOW);
+    bool     prevBtn     = (digitalRead(PIN_BTN) == LOW);
 
-    while (millis() - gpsStart < GPS_FIX_TIMEOUT_MS) {
+    while (!skipGPS && (millis() - gpsStart < GPS_FIX_TIMEOUT_MS)) {
         while (gpsSerial.available()) {
             if (gps.encode(gpsSerial.read())) {
                 if (gps.location.isValid() && gps.location.age() < 2000) {
@@ -533,14 +538,24 @@ void setup() {
         if (newFix) break;
 
         bool sensorNow = (digitalRead(PIN_SW520D) == LOW);
+        bool btnNow    = (digitalRead(PIN_BTN) == LOW);
         uint32_t now   = millis();
 
-        // Tellen op elke verandering (beide richtingen) + tijdsblokkering
+        // Sensor tellen
         if ((sensorNow != prevSensor) && (now - lastTrigger >= SENSOR_DEBOUNCE_MS)) {
             rtc_motionCount++;
             lastTrigger = now;
         }
         prevSensor = sensorNow;
+
+        // Button: indrukken bijhouden
+        if (btnNow && !prevBtn)  btnDownAt = now;
+        // Button loslaten → skip GPS en ga direct naar testfase
+        if (!btnNow && prevBtn) {
+            ledBlink(1, 200);
+            skipGPS = true;
+        }
+        prevBtn = btnNow;
 
         // OLED update elke 200ms
         if (now - lastOledMs >= 200) {
