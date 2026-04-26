@@ -527,7 +527,7 @@ void setup() {
     bool     prevSensor  = (digitalRead(PIN_SW520D) == LOW);
     bool     prevBtn     = (digitalRead(PIN_BTN) == LOW);
 
-    while (!skipGPS && (millis() - gpsStart < GPS_FIX_TIMEOUT_MS)) {
+    while (!skipGPS && !newFix) {
         while (gpsSerial.available()) {
             if (gps.encode(gpsSerial.read())) {
                 if (gps.location.isValid() && gps.location.age() < 2000) {
