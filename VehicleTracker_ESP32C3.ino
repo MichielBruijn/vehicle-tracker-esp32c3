@@ -382,8 +382,13 @@ void goDeepSleep() {
     gpio_pullup_en((gpio_num_t)PIN_SW520D);
     gpio_pulldown_dis((gpio_num_t)PIN_SW520D);
 
-    // ESP32-C3 gebruikt gpio_wakeup in plaats van ext0
-    esp_deep_sleep_enable_gpio_wakeup(1ULL << PIN_SW520D, ESP_GPIO_WAKEUP_GPIO_LOW);
+    // Wake op verandering: stel het tegenovergestelde van de huidige stand in.
+    // Zo maakt oriëntatie niet uit — elke overgang (open→dicht of dicht→open) wekt op.
+    bool pinLow = (digitalRead(PIN_SW520D) == LOW);
+    esp_deep_sleep_enable_gpio_wakeup(
+        1ULL << PIN_SW520D,
+        pinLow ? ESP_GPIO_WAKEUP_GPIO_HIGH : ESP_GPIO_WAKEUP_GPIO_LOW
+    );
 
 #if ENABLE_LORA
     // Als daglimiet bereikt: ook een 24-uurs timer als vangnet voor dag-reset
@@ -510,8 +515,8 @@ void setup() {
         bool sensorNow = (digitalRead(PIN_SW520D) == LOW);
         uint32_t now   = millis();
 
-        // Alleen tellen op neergaande flank (open→gesloten) + tijdsblokkering
-        if (sensorNow && !prevSensor && (now - lastTrigger >= SENSOR_DEBOUNCE_MS)) {
+        // Tellen op elke verandering (beide richtingen) + tijdsblokkering
+        if ((sensorNow != prevSensor) && (now - lastTrigger >= SENSOR_DEBOUNCE_MS)) {
             rtc_motionCount++;
             lastTrigger = now;
         }
