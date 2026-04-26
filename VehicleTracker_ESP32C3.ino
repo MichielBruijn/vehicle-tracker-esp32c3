@@ -519,15 +519,12 @@ void setup() {
 
     // ── GPS fix proberen ─────────────────────────────────────────────────
     bool     newFix      = false;
-    bool     skipGPS     = false;
     uint32_t gpsStart    = millis();
     uint32_t lastOledMs  = 0;
     uint32_t lastTrigger = 0;
-    uint32_t btnDownAt   = 0;
     bool     prevSensor  = (digitalRead(PIN_SW520D) == LOW);
-    bool     prevBtn     = (digitalRead(PIN_BTN) == LOW);
 
-    while (!skipGPS && !newFix) {
+    while (!newFix) {
         while (gpsSerial.available()) {
             if (gps.encode(gpsSerial.read())) {
                 if (gps.location.isValid() && gps.location.age() < 2000) {
@@ -538,7 +535,6 @@ void setup() {
         if (newFix) break;
 
         bool sensorNow = (digitalRead(PIN_SW520D) == LOW);
-        bool btnNow    = (digitalRead(PIN_BTN) == LOW);
         uint32_t now   = millis();
 
         // Sensor tellen
@@ -547,15 +543,6 @@ void setup() {
             lastTrigger = now;
         }
         prevSensor = sensorNow;
-
-        // Button: indrukken bijhouden
-        if (btnNow && !prevBtn)  btnDownAt = now;
-        // Button loslaten → skip GPS en ga direct naar testfase
-        if (!btnNow && prevBtn) {
-            ledBlink(1, 200);
-            skipGPS = true;
-        }
-        prevBtn = btnNow;
 
         // OLED update elke 200ms
         if (now - lastOledMs >= 200) {
@@ -611,35 +598,22 @@ void setup() {
 
     // ── Sensor testloop — live AAN/UIT indicator + satellite count ───────
     {
-        uint32_t testStart    = millis();
-        uint32_t extraMs      = 0;          // verlengingen via button
-        uint32_t lastSensor   = 0;
-        uint32_t btnPressedAt = 0;          // tijdstip button ingedrukt
-        bool prevSensor       = (digitalRead(PIN_SW520D) == LOW);
-        bool prevBtn          = (digitalRead(PIN_BTN) == LOW);
+        uint32_t testStart  = millis();
+        uint32_t lastSensor = 0;
+        bool prevSensor     = (digitalRead(PIN_SW520D) == LOW);
+        bool prevBtn        = (digitalRead(PIN_BTN) == LOW);
         uint8_t sats        = gps.satellites.isValid() ? (uint8_t)gps.satellites.value() : 0;
 
-        while (millis() - testStart < SENSOR_TEST_MS + extraMs) {
+        while (millis() - testStart < SENSOR_TEST_MS) {
             bool sensorNow = (digitalRead(PIN_SW520D) == LOW);
             bool btnNow    = (digitalRead(PIN_BTN) == LOW);
             uint32_t now   = millis();
-            uint32_t elapsed  = now - testStart;
-            uint32_t total    = SENSOR_TEST_MS + extraMs;
-            uint32_t secsLeft = elapsed < total ? (total - elapsed) / 1000 : 0;
+            uint32_t secsLeft = (SENSOR_TEST_MS - (now - testStart)) / 1000;
 
-            // ── Button detectie ─────────────────────────────────────────
+            // Button: reset slaaptimer
             if (btnNow && !prevBtn) {
-                btnPressedAt = now;           // begin indrukken
-            }
-            if (!btnNow && prevBtn) {
-                uint32_t held = now - btnPressedAt;
-                if (held >= 2000) {
-                    extraMs += 30000;         // lang: +30s testijd
-                    ledBlink(1, 400);         // 1 lang = verlengd
-                } else {
-                    rtc_motionCount = 0;      // kort: teller reset
-                    ledBlink(3, 60, 60);      // 3 snel = gereset
-                }
+                testStart = now;   // countdown opnieuw vanaf nu
+                ledBlink(1);
             }
             prevBtn = btnNow;
 
