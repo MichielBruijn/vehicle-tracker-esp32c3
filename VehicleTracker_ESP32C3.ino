@@ -95,7 +95,7 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 #include <TinyGPS++.h>
-#include "driver/rtc_io.h"
+#include "driver/gpio.h"
 #include "esp_sleep.h"
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -317,13 +317,12 @@ void goDeepSleep() {
     oled.setPowerSave(1);
 
     // Pull-up op SW-520D actief houden tijdens deep sleep
-    rtc_gpio_init((gpio_num_t)PIN_SW520D);
-    rtc_gpio_set_direction((gpio_num_t)PIN_SW520D, RTC_GPIO_MODE_INPUT_ONLY);
-    rtc_gpio_pullup_en((gpio_num_t)PIN_SW520D);
-    rtc_gpio_pulldown_dis((gpio_num_t)PIN_SW520D);
+    // (GPIO 0-5 behouden hun pull-up tijdens deep sleep op ESP32-C3)
+    gpio_pullup_en((gpio_num_t)PIN_SW520D);
+    gpio_pulldown_dis((gpio_num_t)PIN_SW520D);
 
-    // Wakeup bij LOW op GPIO2 (SW-520D trilt → verbindt met GND)
-    esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_SW520D, 0);
+    // ESP32-C3 gebruikt gpio_wakeup in plaats van ext0
+    esp_deep_sleep_enable_gpio_wakeup(1ULL << PIN_SW520D, ESP_GPIO_WAKEUP_GPIO_LOW);
 
 #if ENABLE_LORA
     // Als daglimiet bereikt: ook een 24-uurs timer als vangnet voor dag-reset
@@ -362,7 +361,7 @@ void setup() {
     }
 
     // Bij ext0 wakeup maar dagquotum al vol: direct terug slapen
-    if (cause == ESP_SLEEP_WAKEUP_EXT0 && rtc_msgsToday >= MAX_MSGS_PER_DAY) {
+    if (cause == ESP_SLEEP_WAKEUP_GPIO && rtc_msgsToday >= MAX_MSGS_PER_DAY) {
 #if ENABLE_GPS_PWR
         gpio_hold_dis((gpio_num_t)PIN_GPS_PWR);
         gpio_deep_sleep_hold_dis();
