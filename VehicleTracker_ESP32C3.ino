@@ -93,12 +93,18 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <SPI.h>
 #include <U8g2lib.h>
 #include <TinyGPS++.h>
-#include <RadioLib.h>
 #include "driver/rtc_io.h"
 #include "esp_sleep.h"
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  TESTCONFIGURATIE
+//  Zet op 1 als het betreffende onderdeel is aangesloten.
+// ═══════════════════════════════════════════════════════════════════════════
+#define ENABLE_LORA      0   // SX1276 module (GPIO4–7, GPIO10)
+#define ENABLE_BATT_ADC  0   // Spanningsdeler op GPIO3
+#define ENABLE_GPS_PWR   0   // GPS transistorschakelaar op GPIO1
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  PIN DEFINITIES
@@ -136,6 +142,12 @@
 #define BATT_DIVIDER_RATIO  2.0f       // 1MΩ/1MΩ → factor 2
 #define BATT_ADC_SAMPLES    16         // Gemiddelde over N metingen
 
+// Conditionele includes — alleen laden wat ook bedraad is
+#if ENABLE_LORA
+#include <SPI.h>
+#include <RadioLib.h>
+#endif
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  RTC GEHEUGEN — overleeft deep sleep
 // ═══════════════════════════════════════════════════════════════════════════
@@ -156,8 +168,10 @@ TinyGPSPlus    gps;
 // SSD1306 128×64 via hardware I2C (Wire)
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
+#if ENABLE_LORA
 // SX1276: CS, DIO0 (niet gebruikt=NC), RST, DIO1 (niet gebruikt=NC)
 SX1276 radio = new Module(PIN_LORA_CS, RADIOLIB_NC, PIN_LORA_RST, RADIOLIB_NC);
+#endif
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  HELPERS
@@ -168,6 +182,7 @@ uint32_t encodeDateYMD(uint16_t y, uint8_t m, uint8_t d) {
 }
 
 float readBatteryVoltage() {
+#if ENABLE_BATT_ADC
     analogSetAttenuation(ADC_11db);
     uint32_t sum = 0;
     for (uint8_t i = 0; i < BATT_ADC_SAMPLES; i++) {
@@ -176,6 +191,9 @@ float readBatteryVoltage() {
     }
     float vAdc = (sum / (float)BATT_ADC_SAMPLES / 4095.0f) * 3.3f;
     return vAdc * BATT_DIVIDER_RATIO;
+#else
+    return 0.0f;  // Onbekend zonder spanningsdeler
+#endif
 }
 
 uint8_t voltageToPercent(float v) {
@@ -184,7 +202,7 @@ uint8_t voltageToPercent(float v) {
     return (uint8_t)((v - 3.0f) / 1.2f * 100.0f + 0.5f);
 }
 
-void oledShowSearching(uint32_t elapsed_ms, uint8_t batPct) {
+void oledShowSearching(uint32_t elapsed_ms) {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x10_tf);
     oled.drawStr(0, 10, "VehicleTracker");
@@ -198,11 +216,14 @@ void oledShowSearching(uint32_t elapsed_ms, uint8_t batPct) {
     if (barWidth > 0) oled.drawBox(5, 33, barWidth, 6);
 
     char buf[22];
-    snprintf(buf, sizeof(buf), "%lus  Bat:%3u%%",
-             elapsed_ms / 1000, batPct);
+#if ENABLE_BATT_ADC
+    snprintf(buf, sizeof(buf), "%lus", elapsed_ms / 1000);
+#else
+    snprintf(buf, sizeof(buf), "%lus  Bat:--", elapsed_ms / 1000);
+#endif
     oled.drawStr(0, 52, buf);
-    snprintf(buf, sizeof(buf), "Wake#%lu  Tx:%u/3",
-             rtc_wakeupCount, rtc_msgsToday);
+
+    snprintf(buf, sizeof(buf), "Wake#%lu", rtc_wakeupCount);
     oled.drawStr(0, 64, buf);
     oled.sendBuffer();
 }
@@ -218,7 +239,6 @@ void oledShowStatus(float lat, float lon, bool newFix, uint8_t batPct, bool sent
 
     if (rtc_hasPosition) {
         char latStr[20], lonStr[20];
-        // Graden met richting aanduiding
         snprintf(latStr, sizeof(latStr), "%c %.5f",
                  lat >= 0 ? 'N' : 'S', (double)fabsf(lat));
         snprintf(lonStr, sizeof(lonStr), "%c %.5f",
@@ -226,9 +246,8 @@ void oledShowStatus(float lat, float lon, bool newFix, uint8_t batPct, bool sent
         oled.drawStr(0, 26, latStr);
         oled.drawStr(0, 38, lonStr);
         if (!newFix) {
-            // Geeft aan dat dit een opgeslagen positie is
             oled.setFont(u8g2_font_5x7_tf);
-            oled.drawStr(104, 38, "CACHED");
+            oled.drawStr(104, 38, "CACHE");
             oled.setFont(u8g2_font_6x10_tf);
         }
     } else {
@@ -236,21 +255,32 @@ void oledShowStatus(float lat, float lon, bool newFix, uint8_t batPct, bool sent
         oled.drawStr(0, 38, "Geen positie");
     }
 
+    // Statusregel: batterij + LoRa
     char statusLine[22];
-    snprintf(statusLine, sizeof(statusLine), "Bat:%3u%%  Tx:%u/%u",
-             batPct, rtc_msgsToday, MAX_MSGS_PER_DAY);
+#if ENABLE_BATT_ADC
+    snprintf(statusLine, sizeof(statusLine), "Bat:%3u%%", batPct);
+#else
+    snprintf(statusLine, sizeof(statusLine), "Bat:--");
+#endif
     oled.drawStr(0, 52, statusLine);
 
-    // TX resultaat rechts op de statusregel
+#if ENABLE_LORA
+    oled.setFont(u8g2_font_5x7_tf);
     if (sent) {
-        oled.setFont(u8g2_font_5x7_tf);
-        oled.drawStr(90, 52, " SENT");
-        oled.setFont(u8g2_font_6x10_tf);
+        oled.drawStr(72, 52, "Tx:SENT");
     } else if (loraFail) {
-        oled.setFont(u8g2_font_5x7_tf);
-        oled.drawStr(90, 52, " FAIL");
-        oled.setFont(u8g2_font_6x10_tf);
+        oled.drawStr(72, 52, "Tx:FAIL");
+    } else {
+        char txBuf[12];
+        snprintf(txBuf, sizeof(txBuf), "Tx:%u/%u", rtc_msgsToday, MAX_MSGS_PER_DAY);
+        oled.drawStr(72, 52, txBuf);
     }
+    oled.setFont(u8g2_font_6x10_tf);
+#else
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(72, 52, "LoRa:UIT");
+    oled.setFont(u8g2_font_6x10_tf);
+#endif
 
     char wkStr[22];
     snprintf(wkStr, sizeof(wkStr), "Wake#%lu  Tot#%lu",
@@ -259,6 +289,7 @@ void oledShowStatus(float lat, float lon, bool newFix, uint8_t batPct, bool sent
     oled.sendBuffer();
 }
 
+#if ENABLE_LORA
 bool sendLoRaPacket(float lat, float lon, uint8_t batPct) {
     uint8_t payload[10];
     payload[0] = DEVICE_ID;
@@ -268,17 +299,21 @@ bool sendLoRaPacket(float lat, float lon, uint8_t batPct) {
     int state = radio.transmit(payload, sizeof(payload));
     return (state == RADIOLIB_ERR_NONE);
 }
+#endif
 
 void goDeepSleep() {
+#if ENABLE_GPS_PWR
     // Zet GPS uit en houd GPIO laag tijdens slaap
     digitalWrite(PIN_GPS_PWR, LOW);
     gpio_hold_en((gpio_num_t)PIN_GPS_PWR);
     gpio_deep_sleep_hold_en();
+#endif
 
-    // LoRa in slaapstand
+#if ENABLE_LORA
     radio.sleep();
+#endif
 
-    // OLED uit (stuur sleep command)
+    // OLED uit
     oled.setPowerSave(1);
 
     // Pull-up op SW-520D actief houden tijdens deep sleep
@@ -290,10 +325,12 @@ void goDeepSleep() {
     // Wakeup bij LOW op GPIO2 (SW-520D trilt → verbindt met GND)
     esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_SW520D, 0);
 
+#if ENABLE_LORA
     // Als daglimiet bereikt: ook een 24-uurs timer als vangnet voor dag-reset
     if (rtc_msgsToday >= MAX_MSGS_PER_DAY) {
         esp_sleep_enable_timer_wakeup(24ULL * 3600ULL * 1000000ULL);
     }
+#endif
 
     esp_deep_sleep_start();
     // Komt hier nooit — ESP reset na wakeup
@@ -309,37 +346,41 @@ void setup() {
     // ── Wakeup reden controleren ─────────────────────────────────────────
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
 
+#if ENABLE_LORA
     if (cause == ESP_SLEEP_WAKEUP_TIMER) {
         // 24-uurs timer: nieuwe dag aangenomen, teller resetten
         rtc_msgsToday = 0;
         // Meteen terug slapen — wacht op echte beweging
-        // Geen GPS, geen OLED nodig
-        pinMode(PIN_GPS_PWR, OUTPUT);
-        gpio_hold_dis((gpio_num_t)PIN_GPS_PWR);
-        gpio_deep_sleep_hold_dis();
-        digitalWrite(PIN_GPS_PWR, LOW);
-        goDeepSleep();
-        return; // Nooit bereikt
-    }
-
-    // Bij ext0 wakeup maar dagquotum al vol: direct terug slapen
-    if (cause == ESP_SLEEP_WAKEUP_EXT0 && rtc_msgsToday >= MAX_MSGS_PER_DAY) {
-        // Geen GPS, geen OLED — bespaar stroom
+#if ENABLE_GPS_PWR
         gpio_hold_dis((gpio_num_t)PIN_GPS_PWR);
         gpio_deep_sleep_hold_dis();
         pinMode(PIN_GPS_PWR, OUTPUT);
         digitalWrite(PIN_GPS_PWR, LOW);
+#endif
         goDeepSleep();
         return;
     }
 
-    // ── GPIO hold vrijgeven van vorige slaapperiode ──────────────────────
+    // Bij ext0 wakeup maar dagquotum al vol: direct terug slapen
+    if (cause == ESP_SLEEP_WAKEUP_EXT0 && rtc_msgsToday >= MAX_MSGS_PER_DAY) {
+#if ENABLE_GPS_PWR
+        gpio_hold_dis((gpio_num_t)PIN_GPS_PWR);
+        gpio_deep_sleep_hold_dis();
+        pinMode(PIN_GPS_PWR, OUTPUT);
+        digitalWrite(PIN_GPS_PWR, LOW);
+#endif
+        goDeepSleep();
+        return;
+    }
+#endif  // ENABLE_LORA
+
+    // ── GPIO hold vrijgeven en GPS voeding instellen ─────────────────────
+#if ENABLE_GPS_PWR
     gpio_hold_dis((gpio_num_t)PIN_GPS_PWR);
     gpio_deep_sleep_hold_dis();
-
-    // ── GPS voeding aan ──────────────────────────────────────────────────
     pinMode(PIN_GPS_PWR, OUTPUT);
-    digitalWrite(PIN_GPS_PWR, HIGH);
+    digitalWrite(PIN_GPS_PWR, HIGH);  // GPS aan
+#endif
 
     // ── SW-520D input ────────────────────────────────────────────────────
     pinMode(PIN_SW520D, INPUT_PULLUP);
@@ -349,28 +390,28 @@ void setup() {
     oled.begin();
 
     // ── SPI + LoRa ───────────────────────────────────────────────────────
+#if ENABLE_LORA
     SPI.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_CS);
     int loraState = radio.begin(
-        LORA_FREQUENCY,
-        LORA_BANDWIDTH,
-        LORA_SF,
-        LORA_CR,
-        LORA_SYNC_WORD,
-        LORA_TX_POWER,
-        LORA_PREAMBLE
+        LORA_FREQUENCY, LORA_BANDWIDTH, LORA_SF, LORA_CR,
+        LORA_SYNC_WORD, LORA_TX_POWER, LORA_PREAMBLE
     );
+    if (loraState != RADIOLIB_ERR_NONE) {
+        Serial.printf("LoRa init mislukt: %d\n", loraState);
+    }
+#endif
 
-    // ── GPS UART (ontvang-only, geen TX pin nodig) ───────────────────────
-    // NEO-6M stuurt NMEA automatisch na powerup, geef 1s boot-tijd
+    // ── GPS UART (ontvang-only) ──────────────────────────────────────────
+    // NEO-6M stuurt NMEA automatisch; geef 1s boot-tijd na powerup
     delay(1000);
     gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, -1);
 
     // ── Batterijspanning meten ───────────────────────────────────────────
-    float batV   = readBatteryVoltage();
+    float batV    = readBatteryVoltage();
     uint8_t batPct = voltageToPercent(batV);
 
     // ── GPS fix proberen ─────────────────────────────────────────────────
-    bool newFix = false;
+    bool newFix      = false;
     uint32_t gpsStart   = millis();
     uint32_t lastOledMs = 0;
 
@@ -388,7 +429,7 @@ void setup() {
         uint32_t now = millis();
         if (now - lastOledMs >= 1500) {
             lastOledMs = now;
-            oledShowSearching(now - gpsStart, batPct);
+            oledShowSearching(now - gpsStart);
         }
     }
 
@@ -399,8 +440,8 @@ void setup() {
     if (newFix) {
         curLat = (float)gps.location.lat();
         curLon = (float)gps.location.lng();
-        rtc_lastLat    = curLat;
-        rtc_lastLon    = curLon;
+        rtc_lastLat     = curLat;
+        rtc_lastLon     = curLon;
         rtc_hasPosition = true;
 
         // Dag-rollover detecteren via GPS datum
@@ -410,7 +451,7 @@ void setup() {
             );
             if (today != rtc_currentDay) {
                 rtc_currentDay = today;
-                rtc_msgsToday  = 0;   // Nieuwe dag → teller nul
+                rtc_msgsToday  = 0;
             }
         }
     }
@@ -419,6 +460,7 @@ void setup() {
     bool sent     = false;
     bool loraFail = false;
 
+#if ENABLE_LORA
     if (rtc_hasPosition && rtc_msgsToday < MAX_MSGS_PER_DAY) {
         if (loraState == RADIOLIB_ERR_NONE) {
             sent = sendLoRaPacket(curLat, curLon, batPct);
@@ -430,9 +472,9 @@ void setup() {
             }
         } else {
             loraFail = true;
-            Serial.printf("LoRa init mislukt: %d\n", loraState);
         }
     }
+#endif
 
     // ── OLED status tonen ────────────────────────────────────────────────
     oledShowStatus(curLat, curLon, newFix, batPct, sent, loraFail);
