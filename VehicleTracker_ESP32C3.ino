@@ -156,8 +156,8 @@
 // 2 kort:  GPS fix verkregen
 // 3 kort:  LoRa verstuurd
 // 1 lang:  button actie bevestiging
-inline void ledOn()  { digitalWrite(PIN_LED, HIGH); }
-inline void ledOff() { digitalWrite(PIN_LED, LOW);  }
+inline void ledOn()  { digitalWrite(PIN_LED, LOW);  }  // actief-laag
+inline void ledOff() { digitalWrite(PIN_LED, HIGH); }
 
 void ledBlink(uint8_t n, uint16_t onMs = 80, uint16_t offMs = 120) {
     for (uint8_t i = 0; i < n; i++) {
