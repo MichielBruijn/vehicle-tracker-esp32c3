@@ -136,7 +136,7 @@
 
 #define GPS_BAUD            9600
 #define GPS_FIX_TIMEOUT_MS  90000UL    // Max 90s wachten op GPS fix
-#define OLED_DISPLAY_MS     4000       // OLED aan houden na fix/verzending
+#define SENSOR_TEST_MS      30000UL    // Sensor testfase na GPS (ms)
 #define MAX_MSGS_PER_DAY    3          // Max LoRa berichten per kalenderdag
 
 #define BATT_DIVIDER_RATIO  2.0f       // 1MΩ/1MΩ → factor 2
@@ -204,30 +204,88 @@ uint8_t voltageToPercent(float v) {
     return (uint8_t)((v - 3.0f) / 1.2f * 100.0f + 0.5f);
 }
 
-void oledShowSearching(uint32_t elapsed_ms) {
+void oledShowSearching(uint32_t elapsed_ms, bool sensorActive, uint8_t sats) {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x10_tf);
     oled.drawStr(0, 10, "VehicleTracker");
     oled.drawHLine(0, 12, 128);
-    oled.drawStr(0, 28, "GPS zoeken...");
+
+    // GPS zoekstatus + satellieten
+    char gpsLine[22];
+    snprintf(gpsLine, sizeof(gpsLine), "GPS zoeken... sat:%u", sats);
+    oled.drawStr(0, 24, gpsLine);
 
     // Voortgangsbalk (max GPS_FIX_TIMEOUT_MS)
     uint8_t barWidth = (uint8_t)((elapsed_ms * 118UL) / GPS_FIX_TIMEOUT_MS);
     if (barWidth > 118) barWidth = 118;
-    oled.drawFrame(4, 32, 120, 8);
-    if (barWidth > 0) oled.drawBox(5, 33, barWidth, 6);
+    oled.drawFrame(4, 28, 120, 8);
+    if (barWidth > 0) oled.drawBox(5, 29, barWidth, 6);
+
+    // Sensor indicator
+    oled.drawStr(0, 46, "Sensor:");
+    if (sensorActive) {
+        oled.drawBox(50, 37, 40, 11);
+        oled.setDrawColor(0);
+        oled.drawStr(54, 46, "AAN");
+        oled.setDrawColor(1);
+    } else {
+        oled.drawFrame(50, 37, 40, 11);
+        oled.drawStr(54, 46, "---");
+    }
 
     char buf[22];
-#if ENABLE_BATT_ADC
-    snprintf(buf, sizeof(buf), "%lus", elapsed_ms / 1000);
-#else
-    snprintf(buf, sizeof(buf), "%lus  Bat:--", elapsed_ms / 1000);
-#endif
-    oled.drawStr(0, 52, buf);
+    snprintf(buf, sizeof(buf), "%lus  Beweging:%lu", elapsed_ms / 1000, rtc_motionCount);
+    oled.drawStr(0, 64, buf);
+    oled.sendBuffer();
+}
+
+void oledShowTest(float lat, float lon, bool newFix, bool sensorActive,
+                  uint8_t sats, uint32_t secsLeft) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x10_tf);
+
+    if (rtc_hasPosition) {
+        char latStr[20], lonStr[20];
+        snprintf(latStr, sizeof(latStr), "%c %.5f", lat >= 0 ? 'N' : 'S', (double)fabsf(lat));
+        snprintf(lonStr, sizeof(lonStr), "%c %.5f", lon >= 0 ? 'E' : 'W', (double)fabsf(lon));
+        oled.drawStr(0, 10, latStr);
+        oled.drawStr(0, 22, lonStr);
+        if (!newFix) {
+            oled.setFont(u8g2_font_5x7_tf);
+            oled.drawStr(104, 22, "CACHE");
+            oled.setFont(u8g2_font_6x10_tf);
+        }
+    } else {
+        oled.drawStr(0, 10, "Geen GPS fix");
+        oled.drawStr(0, 22, "---");
+    }
+
+    oled.drawHLine(0, 25, 128);
+
+    // Sensor indicator — groot en duidelijk
+    oled.drawStr(0, 37, "Sensor:");
+    if (sensorActive) {
+        oled.drawBox(50, 28, 50, 11);
+        oled.setDrawColor(0);
+        oled.drawStr(54, 37, " AAN ");
+        oled.setDrawColor(1);
+    } else {
+        oled.drawFrame(50, 28, 50, 11);
+        oled.drawStr(54, 37, " --- ");
+    }
+
+    char satBuf[16];
+    snprintf(satBuf, sizeof(satBuf), "sat:%u", sats);
+    oled.drawStr(108, 37, satBuf);
 
     char motBuf[22];
     snprintf(motBuf, sizeof(motBuf), "Beweging: %lu", rtc_motionCount);
-    oled.drawStr(0, 64, motBuf);
+    oled.drawStr(0, 50, motBuf);
+
+    char slpBuf[22];
+    snprintf(slpBuf, sizeof(slpBuf), "Slaap in: %lus", secsLeft);
+    oled.drawStr(0, 62, slpBuf);
+
     oled.sendBuffer();
 }
 
@@ -433,8 +491,9 @@ void setup() {
 
     // ── GPS fix proberen ─────────────────────────────────────────────────
     bool newFix      = false;
-    uint32_t gpsStart   = millis();
-    uint32_t lastOledMs = 0;
+    uint32_t gpsStart    = millis();
+    uint32_t lastOledMs  = 0;
+    uint32_t lastTrigger = 0;
 
     while (millis() - gpsStart < GPS_FIX_TIMEOUT_MS) {
         while (gpsSerial.available()) {
@@ -446,11 +505,20 @@ void setup() {
         }
         if (newFix) break;
 
-        // OLED update elke 1.5s tijdens zoeken
-        uint32_t now = millis();
-        if (now - lastOledMs >= 1500) {
+        bool sensorNow = (digitalRead(PIN_SW520D) == LOW);
+        uint32_t now   = millis();
+
+        // Debounced sensor tellen tijdens zoekfase
+        if (sensorNow && (now - lastTrigger > 200)) {
+            rtc_motionCount++;
+            lastTrigger = now;
+        }
+
+        // OLED update elke 200ms
+        if (now - lastOledMs >= 200) {
             lastOledMs = now;
-            oledShowSearching(now - gpsStart);
+            uint8_t sats = gps.satellites.isValid() ? (uint8_t)gps.satellites.value() : 0;
+            oledShowSearching(now - gpsStart, sensorNow, sats);
         }
     }
 
@@ -497,9 +565,33 @@ void setup() {
     }
 #endif
 
-    // ── OLED status tonen ────────────────────────────────────────────────
-    oledShowStatus(curLat, curLon, newFix, batPct, sent, loraFail);
-    delay(OLED_DISPLAY_MS);
+    // ── Sensor testloop — live AAN/UIT indicator + satellite count ───────
+    {
+        uint32_t testStart  = millis();
+        uint32_t lastSensor = 0;
+        bool lastState      = false;
+        uint8_t sats        = gps.satellites.isValid() ? (uint8_t)gps.satellites.value() : 0;
+
+        while (millis() - testStart < SENSOR_TEST_MS) {
+            bool sensorNow = (digitalRead(PIN_SW520D) == LOW);
+            uint32_t now   = millis();
+            uint32_t secsLeft = (SENSOR_TEST_MS - (now - testStart)) / 1000;
+
+            // Debounced tellen: stijgende flank + minimaal 200ms tussen triggers
+            if (sensorNow && !lastState && (now - lastSensor > 200)) {
+                rtc_motionCount++;
+                lastSensor = now;
+            }
+            lastState = sensorNow;
+
+            // Satellietcount bijwerken als GPS nog data stuurt
+            while (gpsSerial.available()) gps.encode(gpsSerial.read());
+            if (gps.satellites.isValid()) sats = (uint8_t)gps.satellites.value();
+
+            oledShowTest(curLat, curLon, newFix, sensorNow, sats, secsLeft);
+            delay(50);  // ~20 fps
+        }
+    }
 
     // ── GPS UART stoppen en in slaap gaan ────────────────────────────────
     gpsSerial.end();
