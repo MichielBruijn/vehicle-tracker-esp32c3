@@ -137,6 +137,7 @@
 #define GPS_BAUD            9600
 #define GPS_FIX_TIMEOUT_MS  90000UL    // Max 90s wachten op GPS fix
 #define SENSOR_TEST_MS      30000UL    // Sensor testfase na GPS (ms)
+#define SENSOR_DEBOUNCE_MS  600UL      // Minimale tijd tussen twee tellingen
 #define MAX_MSGS_PER_DAY    3          // Max LoRa berichten per kalenderdag
 
 #define BATT_DIVIDER_RATIO  2.0f       // 1MΩ/1MΩ → factor 2
@@ -508,8 +509,8 @@ void setup() {
         bool sensorNow = (digitalRead(PIN_SW520D) == LOW);
         uint32_t now   = millis();
 
-        // Debounced sensor tellen tijdens zoekfase
-        if (sensorNow && (now - lastTrigger > 200)) {
+        // Tijdsblokkering: eenmaal geteld → SENSOR_DEBOUNCE_MS doof
+        if (sensorNow && (now - lastTrigger >= SENSOR_DEBOUNCE_MS)) {
             rtc_motionCount++;
             lastTrigger = now;
         }
@@ -569,7 +570,6 @@ void setup() {
     {
         uint32_t testStart  = millis();
         uint32_t lastSensor = 0;
-        bool lastState      = false;
         uint8_t sats        = gps.satellites.isValid() ? (uint8_t)gps.satellites.value() : 0;
 
         while (millis() - testStart < SENSOR_TEST_MS) {
@@ -577,12 +577,11 @@ void setup() {
             uint32_t now   = millis();
             uint32_t secsLeft = (SENSOR_TEST_MS - (now - testStart)) / 1000;
 
-            // Debounced tellen: stijgende flank + minimaal 200ms tussen triggers
-            if (sensorNow && !lastState && (now - lastSensor > 200)) {
+            // Tijdsblokkering: eenmaal geteld → SENSOR_DEBOUNCE_MS doof
+            if (sensorNow && (now - lastSensor >= SENSOR_DEBOUNCE_MS)) {
                 rtc_motionCount++;
                 lastSensor = now;
             }
-            lastState = sensorNow;
 
             // Satellietcount bijwerken als GPS nog data stuurt
             while (gpsSerial.available()) gps.encode(gpsSerial.read());
