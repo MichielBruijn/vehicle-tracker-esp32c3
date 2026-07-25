@@ -2,12 +2,12 @@
 
 ![Status](https://img.shields.io/badge/status-testing-orange)
 ![Platform](https://img.shields.io/badge/platform-ESP32--C3-blue)
-![LoRa](https://img.shields.io/badge/radio-LoRa%20868MHz-green)
+![LoRaWAN](https://img.shields.io/badge/radio-LoRaWAN%20EU868-green)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 > **⚠️ Testing phase** — This project is still under development. Pin assignments, payload format and parameters may still change.
 
-Deep-sleep GPS vehicle tracker based on the ESP32-C3. Wakes itself up via an SW-520D vibration sensor, obtains a GPS position and sends at most 3 messages per day over LoRa (SX1276, 868 MHz). When there is no movement the position remains unchanged — so the battery lasts for years.
+Deep-sleep GPS vehicle tracker based on the ESP32-C3. A timer wakes the device once every 24 hours; a CD4013B latch remembers whether the SW-520D vibration sensor detected motion in the meantime. Only then is the GPS powered up for a fresh fix. The position is sent over **LoRaWAN (The Things Network, EU868)** using an SX1262 module. No motion means no GPS — so the battery lasts for years.
 
 ---
 
@@ -16,10 +16,12 @@ Deep-sleep GPS vehicle tracker based on the ESP32-C3. Wakes itself up via an SW-
 | Component | Type | Description |
 |---|---|---|
 | Microcontroller | ESP32-C3 Super Mini | Deep sleep ~5 µA |
-| GPS module | GY-GPS6MV2 (NEO-6M) | 9600 baud NMEA, backup battery for hot start |
-| LoRa module | SX1276 | 868 MHz, SF9, BW125, max 14 dBm |
+| GPS module | ATGM336H | 9600 baud NMEA, almanac in flash |
+| LoRa module | DX-LR30-900M22S (Semtech SX1262) | LoRaWAN EU868, up to 22 dBm |
 | OLED display | SSD1306 0.96" 4-pin | 128×64 pixels, I2C |
-| Motion sensor | SW-520D | Vibration/tilt switch, wakeup trigger |
+| Motion sensor | SW-520D | Vibration/tilt switch on a CD4013B SR latch |
+| GPS power switch | ME6211C33 LDO + IRLB3034 MOSFET | GPS fully powered off in sleep |
+| Voltage regulator | HT7833 | 3.3V LDO, ~55 µA quiescent |
 
 ---
 
@@ -28,139 +30,148 @@ Deep-sleep GPS vehicle tracker based on the ESP32-C3. Wakes itself up via an SW-
 ```
 ESP32-C3 GPIO → Component
 ─────────────────────────────────────────────────────────
-GPIO0   ←  GPS TX        (UART1 RX, receives NMEA)
-GPIO1   →  GPS PWR       (NPN base via 1kΩ, HIGH = GPS on)
-GPIO2   ←  SW-520D       (other leg → GND, internal pull-up)
-                          RTC GPIO — ext0 wakeup on LOW
-GPIO3   ←  Bat ADC       (voltage divider: 1MΩ from VBat, 1MΩ to GND)
-GPIO4   →  LoRa SCK      (SPI clock)
+GPIO0   ←  LoRa DIO1     (SX1262 interrupt)
+GPIO1   ←  GPS TX        (UART1 RX, receives NMEA)
+GPIO2   ←  CD4013B Q1    (latch output: HIGH = motion occurred)
+GPIO3   →  LoRa SCK      (SPI clock)
+GPIO4   ←  LoRa BUSY     (SX1262 busy)
 GPIO5   ←  LoRa MISO     (SPI data in)
 GPIO6   →  LoRa MOSI     (SPI data out)
-GPIO7   →  LoRa NSS/CS   (SPI chip select)
-GPIO8   ↔  OLED SDA      (I2C data)
-GPIO9   ↔  OLED SCL      (I2C clock)
-GPIO10  →  LoRa RST      (hardware reset)
+GPIO7   →  LoRa NSS/CS   (SPI chip select, active low)
+GPIO8   →  IRLB3034 gate (HIGH = GPS off; strapping pull-up keeps
+                          it HIGH in deep sleep)
+GPIO9      free          (BOOT pull-up 10kΩ→3V3, do not use)
+GPIO10  →  GPS RX + CD4013B R1  (UART1 TX; pulse HIGH clears latch)
+GPIO20  ↔  OLED SDA      (I2C data)
+GPIO21  ↔  OLED SCL      (I2C clock)
 ```
 
-### GPS power switch (NPN low-side, e.g. BC547 or 2N2222)
+The SX1262 NRST pin is left unconnected (`RADIOLIB_NC`, software reset via SPI). Always connect the antenna before powering the radio.
+
+### GPS power switch
 
 ```
-GPIO1 ──[1kΩ]── Base
-                Collector ── GPS GND
-                Emitter   ── System GND
+GPIO8 HIGH → MOSFET on  → ME6211C CE LOW  → GPS off
+GPIO8 LOW  → MOSFET off → drain high (160kΩ→3V3) → CE HIGH → GPS on
 ```
-`HIGH` on GPIO1 → transistor on → GPS active  
-`LOW` on GPIO1 (also during deep sleep via gpio_hold) → GPS fully off
 
-### Battery voltage divider (GPIO3)
+The strapping pull-up (~8 kΩ) keeps GPIO8 HIGH during deep sleep, so the GPS is always off while sleeping — no `gpio_hold` needed. Switching circuit sleep current: 3.3 V / 160 kΩ ≈ 20 µA.
 
-```
-VBat ──[1MΩ]── GPIO3 ──[1MΩ]── GND
-```
-Quiescent current: ~2 µA at 4V. Scale factor ×2 in firmware.
+### Motion latch (CD4013B)
+
+The SW-520D drives the CD4013B **Set** input. Any vibration latches Q1 HIGH, no matter when it happens. On wakeup the firmware reads Q1 (GPIO2) and then clears the latch with a HIGH pulse on R1 (GPIO10).
 
 ---
 
 ## Operation
 
 ```
-Deep sleep (SW-520D waits for vibration)
+Deep sleep (timer, 24h) — CD4013B latch collects motion events
          │
-         ▼ LOW on GPIO2 (vibration detected)
-Wake-up ESP32-C3
+         ▼ timer wakeup
+Read latch Q1, clear latch
          │
-         ├─ Daily quota reached? → go straight back to sleep
+         ├─ No motion, no cached position → back to sleep
          │
-         ▼
-GPS on, try to get a fix (max 90s)
+         ├─ No motion, position known → send cached position (status 0), GPS stays off
          │
-         ├─ Fix acquired → store position in RTC memory
-         │                  day-rollover check via GPS date
+         ▼ motion detected (or first boot)
+GPS on, wait for a fix (max 90s, then refine up to 10s)
          │
-         ├─ No fix → use last known position (from RTC memory)
+         ├─ Fix acquired → store in RTC memory, send (status 1)
          │
-         ▼
-Messages today < 3?
-         │
-         ├─ Yes → send LoRa packet (lat, lon, battery%)
+         ├─ No fix → send cached position (status 2)
          │
          ▼
-Show OLED status (4 seconds)
-         │
-         ▼
-GPS off, LoRa sleep mode, OLED off
-         │
-         ▼
-Deep sleep (+ 24h timer if quota reached)
+LoRaWAN uplink (port 1), OLED status (4s), everything off, deep sleep
 ```
 
 ---
 
-## LoRa payload (10 bytes)
+## LoRaWAN payload (14 bytes, port 1)
 
-| Byte | Type | Contents |
+| Bytes | Type | Contents |
 |---|---|---|
-| 0 | `uint8` | Device ID (configurable via `DEVICE_ID`) |
-| 1–4 | `float` | Latitude (IEEE 754 LE) |
-| 5–8 | `float` | Longitude (IEEE 754 LE) |
-| 9 | `uint8` | Battery level (0–100%) |
+| 0 | `uint8` | Status: 0 = no motion (cache), 1 = motion + new fix, 2 = motion but GPS timeout (cache) |
+| 1–4 | `int32` LE | Latitude × 1 000 000 |
+| 5–8 | `int32` LE | Longitude × 1 000 000 |
+| 9–11 | `int24` LE | Altitude × 100 (m) |
+| 12–13 | `int16` LE | HDOP × 100 |
 
-Sync word: `0xAB` (private network, not LoRaWAN-compatible)
+### TTN payload formatter
+
+```javascript
+function decodeUplink(input) {
+  var b = input.bytes;
+  function int32le(b,i){var v=b[i]|(b[i+1]<<8)|(b[i+2]<<16)|(b[i+3]<<24);return v;}
+  function int24le(b,i){var v=b[i]|(b[i+1]<<8)|(b[i+2]<<16);if(v&0x800000)v|=0xFF000000;return v|0;}
+  var status    = b[0]; // 0=cache, 1=new fix, 2=moved+no fix
+  var latitude  = int32le(b,1) / 1e6;
+  var longitude = int32le(b,5) / 1e6;
+  var altitude  = int24le(b,9) / 100;
+  var hdop      = (b[12]|(b[13]<<8)) / 100;
+  return { data: { status: status, latitude: latitude, longitude: longitude, altitude: altitude, hdop: hdop } };
+}
+```
+
+After a successful OTAA join, the session (DevAddr, keys, frame counters) is stored in RTC memory and restored on every wakeup, so the device only rejoins after a full power loss.
 
 ---
 
 ## Battery life (estimate)
 
-| Scenario | Consumption/day | Lifetime (18650 3000 mAh) |
-|---|---|---|
-| GPS warm start ~5s | ~0.77 mAh/day | **~8–9 years** |
-| GPS cold start ~60s | ~5.6 mAh/day | ~1–2 years |
+| Item | Consumption |
+|---|---|
+| Deep sleep | ESP32-C3 ~5 µA + HT7833 ~4 µA + divider ~2 µA ≈ 11 µA |
+| GPS warm start | ~20–30 s at 20 mA (almanac in flash) |
+| GPS cold start | 30–120 s at 20 mA (first use or after months) |
+| LoRa TX | ~280 ms at ~90 mA (SX1262) |
+| OLED | 4 s at 10 mA |
 
-> **Tip:** The backup battery on the GY-GPS6MV2 preserves the almanac between wakeups. This makes the difference between a 5-second warm start and a 60-second cold start — and thus between years or months of battery life.
-
----
-
-## Required libraries
-
-Install via the Arduino Library Manager:
-
-- **RadioLib** — Jan Gromeš
-- **TinyGPS++** — Mikal Hart
-- **U8g2** — Oliver Kraus
-
-Board: `ESP32C3 Dev Module` (or Super Mini variant)  
-Upload speed: 115200 / 921600
+With warm GPS starts this works out to roughly **0.8 mAh/day** → about 8 years on an 18650 (3000 mAh, 80% usable). Cold starts every day would reduce that to roughly 1.2 years.
 
 ---
 
-## Configuration (`VehicleTracker_ESP32C3.ino`)
+## Getting started
+
+1. Install the libraries via the Arduino Library Manager:
+   - **RadioLib** — Jan Gromeš
+   - **TinyGPS++** — Mikal Hart
+   - **U8g2** — Oliver Kraus
+2. Copy `secrets.h.example` to `secrets.h` and fill in your TTN OTAA credentials (JoinEUI, DevEUI, AppKey) and optionally WiFi credentials for OTA debugging.
+3. Register the device in the TTN console and paste the payload formatter above.
+4. Board: `ESP32C3 Dev Module` (or Super Mini variant).
+
+### Configuration (`VehicleTracker_ESP32C3.ino`)
 
 ```cpp
-#define DEVICE_ID        0x01   // Unique per tracker
-#define LORA_FREQUENCY   868.0  // MHz (868 EU, 915 USA)
-#define LORA_SF          9      // Spreading factor (7–12)
-#define LORA_TX_POWER    14     // dBm
-#define MAX_MSGS_PER_DAY 3      // Max messages per day
-#define GPS_FIX_TIMEOUT_MS 90000 // Max GPS wait time (ms)
+#define ENABLE_LORA       1     // SX1262 connected
+#define ENABLE_GPS_PWR    1     // GPS power switch connected
+#define ENABLE_WIFI_DEBUG 0     // WiFi + OTA + telnet (0 for production!)
+#define ENABLE_SERIAL     0     // Serial debug output
+
+#define GPS_FIX_TIMEOUT_MS  90000UL  // Max wait for first GPS fix
+#define GPS_REFINE_MS       10000UL  // Refine time after first fix
+#define SLEEP_SEC           86400ULL // Wakeup interval (24h)
 ```
 
----
+### OTA upload
 
-## Arduino Pro Micro compatible?
+With `ENABLE_WIFI_DEBUG 1` the device accepts OTA updates and telnet (port 23) while awake:
 
-No. The ATmega32U4 has only 32KB of flash — not enough for TinyGPS++ + RadioLib + U8g2 combined. It also lacks native ext0 deep sleep wakeup. Use the ESP32-C3.
+```bash
+./ota_upload.sh [ip-address]
+```
 
 ---
 
 ## TODO / Test items
 
 - [ ] Measure current draw in deep sleep (µA logging)
-- [ ] Validate GPS hot-start time after >24h of sleep
-- [ ] Test LoRa range on a vehicle
-- [ ] Receive and decode the payload on the gateway
-- [ ] Calibrate the voltage divider per individual board
+- [ ] Validate GPS warm-start time after >24h of sleep
+- [ ] Test LoRaWAN range on a vehicle
 - [ ] Day-rollover test (24h soak test)
-- [ ] Evaluate vibration debounce (multiple wakeups from a single shock)
+- [ ] Long-term latch reliability (multiple wakeups from a single shock)
 
 ---
 
